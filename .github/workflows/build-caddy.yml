@@ -3,6 +3,10 @@ name: Build Caddy
 on:
   schedule:
     - cron: "0 20 * * *"
+  push:
+    paths:
+      - caddy-build-plugins.json
+      - .github/workflows/build-caddy.yml
   workflow_dispatch:
 
 permissions:
@@ -10,8 +14,7 @@ permissions:
 
 env:
   CADDY_REPO: caddyserver/caddy
-  L4_REPO: mholt/caddy-l4
-  CLOUDFLARE_REPO: caddy-dns/cloudflare
+  PLUGINS_FILE: caddy-build-plugins.json
 
 jobs:
   check:
@@ -22,8 +25,7 @@ jobs:
       release_tag: ${{ steps.versions.outputs.release_tag }}
       release_name: ${{ steps.versions.outputs.release_name }}
       caddy_version: ${{ steps.versions.outputs.caddy_version }}
-      l4_version: ${{ steps.versions.outputs.l4_version }}
-      cloudflare_version: ${{ steps.versions.outputs.cloudflare_version }}
+      plugins_hash: ${{ steps.versions.outputs.plugins_hash }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,16 +75,46 @@ jobs:
             printf '%s' "$1" | tr '/[:space:]' '-' | tr -cd 'A-Za-z0-9._-'
           }
 
+          module_to_repo() {
+            module="$1"
+            case "$module" in
+              github.com/*/*)
+                printf '%s\n' "$module" | cut -d/ -f2-3
+                ;;
+              *)
+                echo "Only github.com module paths are supported: ${module}" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          if ! jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "${PLUGINS_FILE}" >/dev/null; then
+            echo "${PLUGINS_FILE} must be a non-empty JSON array of module path strings" >&2
+            exit 1
+          fi
+
           caddy_version="$(latest_release_or_tag "${CADDY_REPO}" caddy)"
-          l4_version="$(latest_release_or_tag "${L4_REPO}" caddy-l4)"
-          cloudflare_version="$(latest_release_or_tag "${CLOUDFLARE_REPO}" cloudflare)"
-
           caddy_part="$(sanitize_tag_part "$caddy_version")"
-          l4_part="$(sanitize_tag_part "$l4_version")"
-          cloudflare_part="$(sanitize_tag_part "$cloudflare_version")"
 
-          release_tag="caddy-${caddy_part}-l4-${l4_part}-cloudflare-${cloudflare_part}"
-          release_name="Caddy ${caddy_version} + caddy-l4 ${l4_version} + cloudflare ${cloudflare_version}"
+          jq -r '.[]' "${PLUGINS_FILE}" > metadata/plugin_modules.txt
+          : > metadata/plugin_versions.tsv
+          : > metadata/xcaddy_with_args.txt
+
+          while IFS= read -r module; do
+            repo="$(module_to_repo "$module")"
+            metadata_name="$(printf '%s' "$module" | tr '/[:space:]' '-' | tr -cd 'A-Za-z0-9._-')"
+            version="$(latest_release_or_tag "$repo" "$metadata_name")"
+            url="$(jq -r '.url' "metadata/${metadata_name}.json")"
+
+            printf '%s\t%s\t%s\n' "$module" "$version" "$url" >> metadata/plugin_versions.tsv
+            printf -- '--with %s@%s\n' "$module" "$version" >> metadata/xcaddy_with_args.txt
+          done < metadata/plugin_modules.txt
+
+          plugins_hash="$(sha256sum "${PLUGINS_FILE}" metadata/plugin_versions.tsv | sha256sum | cut -c1-12)"
+          plugin_versions="$(awk -F '\t' '{print $2}' metadata/plugin_versions.tsv | paste -sd '+')"
+
+          release_tag="caddy-${caddy_part}-plugins-${plugins_hash}"
+          release_name="Caddy ${caddy_version} + plugins ${plugin_versions}"
 
           if git ls-remote --exit-code --tags origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
             should_build=false
@@ -98,15 +130,13 @@ jobs:
             echo "| Component | Version | Source |"
             echo "| --- | --- | --- |"
             echo "| Caddy | ${caddy_version} | $(jq -r '.url' metadata/caddy.json) |"
-            echo "| caddy-l4 | ${l4_version} | $(jq -r '.url' metadata/caddy-l4.json) |"
-            echo "| caddy-dns/cloudflare | ${cloudflare_version} | $(jq -r '.url' metadata/cloudflare.json) |"
+            awk -F '\t' '{printf "| %s | %s | %s |\n", $1, $2, $3}' metadata/plugin_versions.tsv
             echo
             echo "Build command:"
             echo
             echo '```sh'
             echo "xcaddy build ${caddy_version} \\"
-            echo "  --with github.com/mholt/caddy-l4@${l4_version} \\"
-            echo "  --with github.com/caddy-dns/cloudflare@${cloudflare_version}"
+            sed 's/^/  /; $!s/$/ \\/' metadata/xcaddy_with_args.txt
             echo '```'
             echo
             echo "## Caddy release notes"
@@ -119,8 +149,7 @@ jobs:
             echo "release_tag=${release_tag}"
             echo "release_name=${release_name}"
             echo "caddy_version=${caddy_version}"
-            echo "l4_version=${l4_version}"
-            echo "cloudflare_version=${cloudflare_version}"
+            echo "plugins_hash=${plugins_hash}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload release metadata
@@ -128,7 +157,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-metadata
-          path: metadata/release_notes.md
+          path: |
+            metadata/release_notes.md
+            metadata/xcaddy_with_args.txt
           retention-days: 1
           if-no-files-found: error
 
@@ -155,14 +186,18 @@ jobs:
       - name: Install xcaddy
         run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 
+      - name: Download build metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+          path: metadata
+
       - name: Build Caddy
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "0"
           CADDY_VERSION: ${{ needs.check.outputs.caddy_version }}
-          L4_VERSION: ${{ needs.check.outputs.l4_version }}
-          CLOUDFLARE_VERSION: ${{ needs.check.outputs.cloudflare_version }}
         run: |
           set -euo pipefail
 
@@ -171,8 +206,7 @@ jobs:
 
           xcaddy build "${CADDY_VERSION}" \
             --output "${output}" \
-            --with "github.com/mholt/caddy-l4@${L4_VERSION}" \
-            --with "github.com/caddy-dns/cloudflare@${CLOUDFLARE_VERSION}"
+            $(cat metadata/xcaddy_with_args.txt)
 
           "${output}" version
 

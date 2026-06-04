@@ -208,7 +208,11 @@ jobs:
             --output "${output}" \
             $(cat metadata/xcaddy_with_args.txt)
 
-          "${output}" version
+          if [ "${GOOS}/${GOARCH}" = "linux/amd64" ]; then
+            "${output}" version
+          else
+            file "${output}"
+          fi
 
       - name: Package artifact
         env:

@@ -1,11 +1,23 @@
 # caddy-builder
 
-This repository builds custom Caddy binaries with:
+## Build contents
 
-- plugins listed in `caddy-build-plugins.json`
+This repository builds Caddy 2 with the plugins listed in `caddy-build-plugins.json`.
 
-The GitHub Actions workflow in `.github/workflows/build-caddy.yml` runs daily, runs when `caddy-build-plugins.json` changes, and can also be started manually. It checks the latest upstream Caddy release plus the latest releases or tags for each configured plugin. A new release is created only when that combined version set or plugin file content has not been published before.
+Current plugins:
 
-Release notes are based on the upstream Caddy release notes, with an added component table showing the exact plugin versions used for the build.
+- `github.com/mholt/caddy-l4`
+- `github.com/caddy-dns/cloudflare`
 
-The workflow uses the built-in `GITHUB_TOKEN` with `contents: write` permission to create releases and upload assets.
+## Plugin purpose
+
+- `github.com/mholt/caddy-l4`: adds layer 4 TCP/UDP proxy support to Caddy.
+- `github.com/caddy-dns/cloudflare`: adds Cloudflare DNS support for ACME DNS-01 certificate challenges.
+
+## Build command
+
+```sh
+xcaddy build \
+  --with github.com/mholt/caddy-l4 \
+  --with github.com/caddy-dns/cloudflare
+```

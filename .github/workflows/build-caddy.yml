@@ -125,8 +125,6 @@ jobs:
           fi
 
           {
-            echo "# ${release_name}"
-            echo
             echo "Built with:"
             echo
             echo "| Component | Version | Source |"

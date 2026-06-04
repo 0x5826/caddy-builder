@@ -112,7 +112,7 @@ jobs:
 
           plugins_hash="$(sha256sum "${PLUGINS_FILE}" metadata/plugin_versions.tsv | sha256sum | cut -c1-12)"
 
-          release_tag="caddy-${caddy_part}-plugins-${plugins_hash}"
+          release_tag="v${caddy_part}-${plugins_hash}"
           release_name="$(jq -r '.name // .tagName // empty' metadata/caddy.json)"
           if [ -z "$release_name" ] || [ "$release_name" = "null" ]; then
             release_name="$caddy_version"

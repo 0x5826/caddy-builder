@@ -261,5 +261,6 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "${RELEASE_TAG}" artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "${RELEASE_NAME}" \
             --notes-file metadata/release_notes.md

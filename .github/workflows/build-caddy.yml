@@ -211,11 +211,14 @@ jobs:
 
       - name: Package artifact
         env:
-          RELEASE_TAG: ${{ needs.check.outputs.release_tag }}
+          CADDY_VERSION: ${{ needs.check.outputs.caddy_version }}
         run: |
           set -euo pipefail
-          tar -C dist -czf "dist/${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" "caddy-${{ matrix.os }}-${{ matrix.arch }}"
-          sha256sum "dist/${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" > "dist/${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256"
+          artifact_version="${CADDY_VERSION#v}"
+          artifact_base="caddy_${artifact_version}_explugins_${{ matrix.os }}_${{ matrix.arch }}"
+
+          tar -C dist -czf "dist/${artifact_base}.tar.gz" "caddy-${{ matrix.os }}-${{ matrix.arch }}"
+          sha256sum "dist/${artifact_base}.tar.gz" > "dist/${artifact_base}.tar.gz.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

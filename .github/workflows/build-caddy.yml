@@ -1,0 +1,227 @@
+name: Build Caddy
+
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CADDY_REPO: caddyserver/caddy
+  L4_REPO: mholt/caddy-l4
+  CLOUDFLARE_REPO: caddy-dns/cloudflare
+
+jobs:
+  check:
+    name: Check upstream releases
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.versions.outputs.should_build }}
+      release_tag: ${{ steps.versions.outputs.release_tag }}
+      release_name: ${{ steps.versions.outputs.release_name }}
+      caddy_version: ${{ steps.versions.outputs.caddy_version }}
+      l4_version: ${{ steps.versions.outputs.l4_version }}
+      cloudflare_version: ${{ steps.versions.outputs.cloudflare_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve latest upstream versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p metadata
+
+          latest_release_or_tag() {
+            repo="$1"
+            name="$2"
+
+            if gh release view --repo "${repo}" --json tagName,name,url,body > "metadata/${name}.json"; then
+              jq -r '.tagName' "metadata/${name}.json"
+              return
+            fi
+
+            gh api "repos/${repo}/tags?per_page=1" > "metadata/${name}-tags.json"
+            tag="$(jq -r '.[0].name // empty' "metadata/${name}-tags.json")"
+            if [ -z "$tag" ]; then
+              echo "No release or tag found for ${repo}" >&2
+              exit 1
+            fi
+
+            jq -n \
+              --arg tag "$tag" \
+              --arg repo "$repo" \
+              '{
+                tagName: $tag,
+                name: $tag,
+                url: ("https://github.com/" + $repo + "/releases/tag/" + $tag),
+                body: "No GitHub Release was found for this component; using the latest tag instead."
+              }' > "metadata/${name}.json"
+
+            printf '%s\n' "$tag"
+          }
+
+          sanitize_tag_part() {
+            printf '%s' "$1" | tr '/[:space:]' '-' | tr -cd 'A-Za-z0-9._-'
+          }
+
+          caddy_version="$(latest_release_or_tag "${CADDY_REPO}" caddy)"
+          l4_version="$(latest_release_or_tag "${L4_REPO}" caddy-l4)"
+          cloudflare_version="$(latest_release_or_tag "${CLOUDFLARE_REPO}" cloudflare)"
+
+          caddy_part="$(sanitize_tag_part "$caddy_version")"
+          l4_part="$(sanitize_tag_part "$l4_version")"
+          cloudflare_part="$(sanitize_tag_part "$cloudflare_version")"
+
+          release_tag="caddy-${caddy_part}-l4-${l4_part}-cloudflare-${cloudflare_part}"
+          release_name="Caddy ${caddy_version} + caddy-l4 ${l4_version} + cloudflare ${cloudflare_version}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            should_build=false
+          else
+            should_build=true
+          fi
+
+          {
+            echo "# ${release_name}"
+            echo
+            echo "Built with:"
+            echo
+            echo "| Component | Version | Source |"
+            echo "| --- | --- | --- |"
+            echo "| Caddy | ${caddy_version} | $(jq -r '.url' metadata/caddy.json) |"
+            echo "| caddy-l4 | ${l4_version} | $(jq -r '.url' metadata/caddy-l4.json) |"
+            echo "| caddy-dns/cloudflare | ${cloudflare_version} | $(jq -r '.url' metadata/cloudflare.json) |"
+            echo
+            echo "Build command:"
+            echo
+            echo '```sh'
+            echo "xcaddy build ${caddy_version} \\"
+            echo "  --with github.com/mholt/caddy-l4@${l4_version} \\"
+            echo "  --with github.com/caddy-dns/cloudflare@${cloudflare_version}"
+            echo '```'
+            echo
+            echo "## Caddy release notes"
+            echo
+            jq -r '.body // ""' metadata/caddy.json
+          } > metadata/release_notes.md
+
+          {
+            echo "should_build=${should_build}"
+            echo "release_tag=${release_tag}"
+            echo "release_name=${release_name}"
+            echo "caddy_version=${caddy_version}"
+            echo "l4_version=${l4_version}"
+            echo "cloudflare_version=${cloudflare_version}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload release metadata
+        if: steps.versions.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: metadata/release_notes.md
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.os }}/${{ matrix.arch }}
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: Install xcaddy
+        run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+      - name: Build Caddy
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+          CADDY_VERSION: ${{ needs.check.outputs.caddy_version }}
+          L4_VERSION: ${{ needs.check.outputs.l4_version }}
+          CLOUDFLARE_VERSION: ${{ needs.check.outputs.cloudflare_version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          output="dist/caddy-${GOOS}-${GOARCH}"
+
+          xcaddy build "${CADDY_VERSION}" \
+            --output "${output}" \
+            --with "github.com/mholt/caddy-l4@${L4_VERSION}" \
+            --with "github.com/caddy-dns/cloudflare@${CLOUDFLARE_VERSION}"
+
+          "${output}" version
+
+      - name: Package artifact
+        env:
+          RELEASE_TAG: ${{ needs.check.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tar -C dist -czf "dist/${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" "caddy-${{ matrix.os }}-${{ matrix.arch }}"
+          sha256sum "dist/${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" > "dist/${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: caddy-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs:
+      - check
+      - build
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+          path: metadata
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: caddy-*
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.check.outputs.release_tag }}
+          RELEASE_NAME: ${{ needs.check.outputs.release_name }}
+        run: |
+          set -euo pipefail
+          gh release create "${RELEASE_TAG}" artifacts/* \
+            --title "${RELEASE_NAME}" \
+            --notes-file metadata/release_notes.md
